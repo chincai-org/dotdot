@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>Dot Dot</title>
+		<link rel="stylesheet" href="style.css">
+	</head>
+	<body>
+		<main>
+			<div id="stage">
+				<div id="board-wrap">
+					<div id="board-pin">
+						<canvas id="board" tabindex="0" aria-label="Dot placement board. Arrow keys move the cursor, Enter or Space places a stone, Shift plus arrow keys pan."></canvas>
+					</div>
+					<div id="board-spacer"></div>
+				</div>
+
+				<div id="coord" aria-hidden="true"
+					title="Crossing at the top-left of the view">x 0 · y 0</div>
+
+				<div id="hud">
+					<div id="controls" class="panel">
+						<button
+							id="controls-tab"
+							class="tab"
+							type="button"
+							aria-expanded="false"
+							aria-controls="controls-body"
+							aria-label="Settings"
+							aria-describedby="status"
+							title="Show settings"
+						>
+							<span id="status" aria-live="polite">Red to play</span>
+						</button>
+						<div id="controls-body" class="panel-inner">
+							<div class="settings">
+								<div class="field">
+									<label for="players">Players</label>
+									<div class="stepper">
+										<button
+											id="players-dec"
+											type="button"
+											aria-label="Fewer players"
+										>−</button>
+										<input
+											id="players"
+											type="number"
+											min="2"
+											max="48"
+											step="1"
+											value="2"
+											inputmode="numeric"
+											autocomplete="off"
+										>
+										<button
+											id="players-inc"
+											type="button"
+											aria-label="More players"
+										>+</button>
+									</div>
+								</div>
+								<div class="field">
+									<label for="board-size">Board Size</label>
+									<div class="stepper">
+										<button
+											id="board-dec"
+											type="button"
+											aria-label="Smaller board"
+										>−</button>
+										<input
+											id="board-size"
+											type="number"
+											min="5"
+											max="1000"
+											step="1"
+											value="13"
+											inputmode="numeric"
+											autocomplete="off"
+										>
+										<button
+											id="board-inc"
+											type="button"
+											aria-label="Larger board"
+										>+</button>
+									</div>
+								</div>
+							</div>
+							<div class="actions">
+								<button id="undo" type="button" disabled>Undo</button>
+								<button id="clear" type="button" disabled>Clear</button>
+							</div>
+						</div>
+					</div>
+
+					<aside id="scores" class="panel">
+						<button
+							id="scores-tab"
+							class="tab"
+							type="button"
+							aria-expanded="false"
+							aria-controls="scores-body"
+							aria-label="Scores"
+							aria-describedby="leader-line"
+							title="Show territory scores"
+						>
+							<span id="leader-dot" class="score-dot"></span>
+							<span id="leader-line">No territory</span>
+						</button>
+						<div id="scores-body" class="panel-inner">
+							<ol id="scores-list" class="scores-list"></ol>
+						</div>
+					</aside>
+				</div>
+			</div>
+		</main>
+		<script src="main.js"></script>
+	</body>
+</html>

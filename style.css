@@ -1,0 +1,483 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: dark light;
+  --bg-1: #2c2c35;
+  --bg-2: #131318;
+  --text: #e8e3da;
+  --muted: #cfc8bb;
+  --surface: rgb(255 255 255 / 0.07);
+  --surface-hover: rgb(255 255 255 / 0.14);
+  --border: rgb(255 255 255 / 0.14);
+  --focus: #7fb2ff;
+  --overlay: rgb(24 24 30 / 0.72);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg-1: #f7f4ed;
+    --bg-2: #ddd5c6;
+    --text: #232119;
+    --muted: #5f5a4e;
+    --surface: rgb(0 0 0 / 0.05);
+    --surface-hover: rgb(0 0 0 / 0.1);
+    --border: rgb(0 0 0 / 0.16);
+    --focus: #2563eb;
+    --overlay: rgb(250 248 243 / 0.8);
+  }
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  padding: 12px;
+  background: radial-gradient(
+    circle at 30% 15%,
+    var(--bg-1),
+    var(--bg-2) 70%
+  );
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+#stage {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+}
+
+/* Frame stays a fixed square and scrolls when the board is larger. The
+   canvas is only as big as this frame; the spacer behind it carries the full
+   board size, so a 1000x1000 board costs the same bitmap as a 20x20 one. */
+#board-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* Zero-size pin holding the canvas. Sticky in both axes, so the canvas stays
+   glued to the frame while the spacer scrolls underneath it. The browser
+   moves it, not a scroll handler, so a fast scroll never exposes the
+   background before the next repaint. */
+#board-pin {
+  position: sticky;
+  top: 0;
+  left: 0;
+  flex: 0 0 auto;
+  z-index: 1;
+  width: 0;
+  height: 0;
+}
+
+#board-spacer {
+  flex: 0 0 auto;
+  margin: auto;
+  pointer-events: none;
+}
+
+#board-wrap::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+#board-wrap::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 8px;
+}
+
+#board-wrap::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Canvas gets an explicit pixel size from JS: exactly the visible frame. */
+#board {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  border-radius: 10px;
+  background: linear-gradient(160deg, #e2c288, #d3a967 55%, #c99f5a);
+  box-shadow:
+    0 18px 44px rgb(0 0 0 / 0.35),
+    inset 0 0 0 1px rgb(0 0 0 / 0.18);
+  cursor: crosshair;
+  touch-action: pan-x pan-y;
+  user-select: none;
+}
+
+/* Scroll address: the crossing at the top-left of the frame. */
+#coord {
+  position: absolute;
+  left: 20px;
+  bottom: 20px;
+  z-index: 3;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--overlay);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+/* HUD: two fixed-width panels in one row. Each panel collapses to its
+   header plus the divider line and unfolds on hover (or tap). */
+#hud {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.panel {
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--overlay);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.22);
+  pointer-events: auto;
+}
+
+/* Collapsed is literally the header: the box ends at the divider line.
+   Hover (or tap) brings the body back. No partial heights. */
+.panel-inner {
+  display: none;
+}
+
+.panel.open .panel-inner {
+  display: flex;
+}
+
+/* Typing in a field pins the panel open too. */
+.panel.keep-open .panel-inner {
+  display: flex;
+}
+
+@media (hover: hover) {
+  .panel:hover .panel-inner {
+    display: flex;
+  }
+}
+
+#controls {
+  width: min(320px, 100%);
+}
+
+#scores {
+  width: min(240px, 100%);
+}
+
+/* The divider stays visible when the panel is collapsed: the box folds
+   down to exactly this line. */
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  white-space: nowrap;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.panel-inner {
+  padding: 6px 8px 8px;
+}
+
+#controls .panel-inner {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+#scores .panel-inner {
+  flex-direction: column;
+  gap: 2px;
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.settings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-right: 2px;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+#leader-line {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Leaderboard: rows stack and grow downward, never sideways. */
+.scores-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scores-list li {
+  display: grid;
+  grid-template-columns: 9px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+
+.scores-list li.top {
+  background: var(--surface);
+}
+
+.score-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--dot, var(--muted));
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+/* Cross-shaped players get an X marker in the leaderboard too. */
+.score-dot.cross {
+  position: relative;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.score-dot.cross::before,
+.score-dot.cross::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: -12%;
+  width: 124%;
+  height: 2.4px;
+  margin-top: -1.2px;
+  border-radius: 2px;
+  background: var(--dot, var(--muted));
+}
+
+.score-dot.cross::before {
+  transform: rotate(45deg);
+}
+
+.score-dot.cross::after {
+  transform: rotate(-45deg);
+}
+
+.score-name {
+  color: var(--muted);
+}
+
+.score-points {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+#status::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--dot, #888);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+/* Cross-shaped players get an X marker in the status bar too. */
+#status.cross::before {
+  border-radius: 0;
+  background:
+    linear-gradient(
+      45deg,
+      transparent 42%,
+      var(--dot) 42% 58%,
+      transparent 58%
+    ),
+    linear-gradient(
+      -45deg,
+      transparent 42%,
+      var(--dot) 42% 58%,
+      transparent 58%
+    );
+  box-shadow: none;
+}
+
+#board:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+select,
+button {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+
+button {
+  padding: 6px 12px;
+}
+
+/* Stepper: minus / number / plus. Native spinners are hidden so no arrow
+   ever sits on top of the digits. */
+.stepper {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.stepper button {
+  padding: 0 9px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.stepper input {
+  width: 4ch;
+  padding: 6px 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: center;
+  cursor: text;
+}
+
+.stepper input::-webkit-outer-spin-button,
+.stepper input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.stepper input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.stepper:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+select:hover,
+.stepper button:hover:not(:disabled),
+button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+select:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (max-width: 560px) {
+  /* Narrow screens: stack the two panels, still full width and always open. */
+  #hud {
+    flex-direction: column;
+  }
+
+  #controls,
+  #scores {
+    width: 100%;
+  }
+
+  .actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}

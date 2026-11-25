@@ -16,8 +16,45 @@
 					<div id="board-spacer"></div>
 				</div>
 
-				<div id="coord" aria-hidden="true"
-					title="Crossing at the top-left of the view">x 0 · y 0</div>
+				<aside id="history" class="panel">
+					<button
+						id="history-tab"
+						class="tab"
+						type="button"
+						aria-expanded="false"
+						aria-controls="history-body"
+						aria-label="Move history"
+						aria-describedby="history-line"
+						title="Show move history"
+					>
+						<span id="history-line">No moves</span>
+					</button>
+					<div id="history-body" class="panel-inner">
+						<ol id="history-list" class="history-list"></ol>
+					</div>
+				</aside>
+
+				<div id="coord" title="Cursor coordinate. Edit x or y to jump.">
+					<label for="coord-x">x</label>
+					<input
+						id="coord-x"
+						type="number"
+						step="1"
+						inputmode="numeric"
+						autocomplete="off"
+						value="0"
+					>
+					<span class="coord-sep" aria-hidden="true">·</span>
+					<label for="coord-y">y</label>
+					<input
+						id="coord-y"
+						type="number"
+						step="1"
+						inputmode="numeric"
+						autocomplete="off"
+						value="0"
+					>
+				</div>
 
 				<div id="hud">
 					<div id="controls" class="panel">
@@ -72,7 +109,7 @@
 											id="board-size"
 											type="number"
 											min="5"
-											max="1000"
+											max="94000000"
 											step="1"
 											value="13"
 											inputmode="numeric"

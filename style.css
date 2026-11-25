@@ -67,8 +67,9 @@ main {
 }
 
 /* Frame stays a fixed square and scrolls when the board is larger. The
-   canvas is only as big as this frame; the spacer behind it carries the full
-   board size, so a 1000x1000 board costs the same bitmap as a 20x20 one. */
+   canvas is only as big as this frame; the spacer behind it is a capped
+   virtual range, so even a 94,000,000x94,000,000 board stays under browser
+   scroll limits and costs the same bitmap as a 20x20 one. */
 #board-wrap {
   position: relative;
   display: flex;
@@ -129,16 +130,19 @@ main {
     0 18px 44px rgb(0 0 0 / 0.35),
     inset 0 0 0 1px rgb(0 0 0 / 0.18);
   cursor: crosshair;
-  touch-action: pan-x pan-y;
+  touch-action: pan-x pan-y pinch-zoom;
   user-select: none;
 }
 
-/* Scroll address: the crossing at the top-left of the frame. */
+/* Cursor coordinate: also the jump-to fields. */
 #coord {
   position: absolute;
   left: 20px;
   bottom: 20px;
   z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   padding: 3px 9px;
   border-radius: 999px;
   border: 1px solid var(--border);
@@ -147,7 +151,40 @@ main {
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
-  pointer-events: none;
+}
+
+#coord label {
+  color: var(--muted);
+}
+
+#coord input {
+  /* Fallback width: fits the widest coordinate the 94,000,000 cap can
+     produce (-47,000,000, nine characters). startGame narrows it per board. */
+  width: 9.5ch;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+#coord input::-webkit-outer-spin-button,
+#coord input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+#coord input:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.coord-sep {
+  color: var(--muted);
 }
 
 /* HUD: two fixed-width panels in one row. Each panel collapses to its
@@ -202,6 +239,62 @@ main {
 
 #scores {
   width: min(240px, 100%);
+}
+
+/* Move history sits in the bottom-right corner, out of the HUD row. */
+#history {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 3;
+  width: min(270px, calc(100% - 24px));
+}
+
+#history .panel-inner {
+  flex-direction: column;
+  max-height: min(45vh, 380px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.history-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history-list li {
+  display: grid;
+  grid-template-columns: 9px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+
+/* Newest row is on top; tint it like the score leader. */
+.history-list li:first-child {
+  background: var(--surface);
+}
+
+.history-name {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-coord {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The truncation notice spans the whole row instead of the 9px dot column. */
+.history-more {
+  grid-column: 1 / -1;
+  color: var(--muted);
 }
 
 /* The divider stays visible when the panel is collapsed: the box folds
@@ -420,7 +513,8 @@ button {
 }
 
 .stepper input {
-  width: 4ch;
+  /* Fits the largest board: 94,000,000 is eight digits. */
+  width: 9ch;
   padding: 6px 2px;
   border: 0;
   border-radius: 0;
@@ -479,5 +573,13 @@ button:focus-visible {
   .actions {
     width: 100%;
     justify-content: flex-end;
+  }
+}
+
+/* On narrow phones the coordinate pill and the history header share the
+   bottom edge. Lift the panel above the pill; it still opens upward. */
+@media (max-width: 420px) {
+  #history {
+    bottom: 56px;
   }
 }

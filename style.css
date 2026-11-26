@@ -5,30 +5,29 @@
 }
 
 :root {
-  color-scheme: dark light;
-  --bg-1: #2c2c35;
-  --bg-2: #131318;
-  --text: #e8e3da;
-  --muted: #cfc8bb;
-  --surface: rgb(255 255 255 / 0.07);
-  --surface-hover: rgb(255 255 255 / 0.14);
-  --border: rgb(255 255 255 / 0.14);
-  --focus: #7fb2ff;
-  --overlay: rgb(24 24 30 / 0.72);
+  color-scheme: light dark;
+  accent-color: var(--focus);
+  --bg-1: light-dark(#f7f4ed, #2c2c35);
+  --bg-2: light-dark(#ddd5c6, #131318);
+  --text: light-dark(#232119, #e8e3da);
+  --muted: light-dark(#5f5a4e, #cfc8bb);
+  --surface: light-dark(rgb(0 0 0 / 0.05), rgb(255 255 255 / 0.07));
+  --surface-hover: light-dark(rgb(0 0 0 / 0.1), rgb(255 255 255 / 0.14));
+  --border: light-dark(rgb(0 0 0 / 0.16), rgb(255 255 255 / 0.14));
+  --focus: light-dark(#2563eb, #7fb2ff);
+  --overlay: light-dark(rgb(250 248 243 / 0.8), rgb(24 24 30 / 0.72));
+  --dialog-bg: light-dark(#fbf8f1, #1b1b22);
+  --danger: light-dark(#b3261e, #ff8a80);
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg-1: #f7f4ed;
-    --bg-2: #ddd5c6;
-    --text: #232119;
-    --muted: #5f5a4e;
-    --surface: rgb(0 0 0 / 0.05);
-    --surface-hover: rgb(0 0 0 / 0.1);
-    --border: rgb(0 0 0 / 0.16);
-    --focus: #2563eb;
-    --overlay: rgb(250 248 243 / 0.8);
-  }
+/* The inline head script writes the saved override into the meta tag.
+   No attribute means "light dark", so the system preference still wins. */
+:root:has(> head > meta[name="color-scheme"][content="dark"]) {
+  color-scheme: dark;
+}
+
+:root:has(> head > meta[name="color-scheme"][content="light"]) {
+  color-scheme: light;
 }
 
 html,
@@ -582,4 +581,136 @@ button:focus-visible {
   #history {
     bottom: 56px;
   }
+}
+
+/* ---- preferences dialog -------------------------------------------- */
+
+dialog {
+  width: min(460px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  padding: 16px 18px 18px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--dialog-bg);
+  color: var(--text);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 0.45);
+}
+
+/* Only style the open state: a bare display would defeat the closed state. */
+dialog[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  background: rgb(0 0 0 / 0.45);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.prefs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.prefs-head h1 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.prefs-close-form {
+  margin: 0;
+}
+
+.prefs-close {
+  padding: 0 8px;
+  font-size: 18px;
+  line-height: 1.4;
+}
+
+.prefs-group {
+  margin: 0;
+  padding: 8px 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.prefs-group legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.theme-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 12.5px;
+}
+
+.theme-options label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.theme-note,
+.prefs-hint,
+.prefs-error {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.prefs-error {
+  min-height: 1em;
+  color: var(--danger);
+}
+
+.prefs-rows {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 12.5px;
+}
+
+.prefs-rows span {
+  color: var(--muted);
+}
+
+.binding {
+  min-width: 96px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.binding.capturing {
+  color: var(--focus);
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.prefs-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.prefs-actions form {
+  margin: 0;
 }

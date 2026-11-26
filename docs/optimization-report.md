@@ -213,6 +213,120 @@ move; memory grows with the game, just ~6–10× slower. A cap would keep only t
 newest N moves, so undo could not pass the oldest kept move; compaction alone
 preserves unlimited undo.
 
+## Update: round 2 (chunked history, 3-byte indices, wall recycling)
+
+Three storage changes remove the remaining history slack and stop wall node
+ids from growing under undo/redo churn. Replay/checkpoint undo was measured and
+rejected. `bench/differential.js` still reports zero mismatches.
+
+### 10. Chunked history
+
+The six history columns are now arrays of 4,096-entry chunks instead of one
+doubling typed array each. At a length just above a power of two the old
+columns reserved almost twice the live bytes; chunking leaves at most one
+partial chunk. The accessors `historyMoveIndex()` and friends translate a live
+index to chunk + offset; the history panel and the benchmark harness use them.
+
+| case | flat doubling | chunked | change |
+|---|---:|---:|---:|
+| 100k random moves, history only | 1.67 MB, 18 B/move | 1.32 MB, 14 B/move | 21% less |
+| 1.3M played moves, whole game | 101.7 MB, 82 B/move, 183 MB RSS | 92.1 MB, 74 B/move, 167 MB RSS | 9% less |
+| 1M played moves, whole game | 58.4 MB, 61 B/move | 58.1 MB, 61 B/move | 0.6 MB (length is a power of two) |
+| 100k-victim capture, history only | 0.60–0.66 MB, 6.4–6.9 B/stone | 0.52–0.58 MB, 5.4–6.0 B/stone | ~12% less |
+| place 100k moves | 30.3 µs/move | 30.7 µs/move | unchanged |
+| 5M played moves | — | 346 MB, 73 B/move, 423 MB RSS | new scaling point |
+
+Undo keeps the chunk high-water mark, just as the flat arrays did. An earlier
+version trimmed trailing chunks on every pop; a place/undo churn then
+reallocated a 4-chunk block each cycle and was ~19% slower, so trimming was
+removed.
+
+### 11. Three-byte history indices
+
+A flat move index fits in 24 bits while `dim <= 4096` (`4096^2 = 2^24`).
+Small boards store three bytes per move; larger boards keep a 32-bit column,
+so the 94,000,000 cap is unchanged. The narrow path saves 1 B/move, 7.7% of
+the 13 B record.
+
+| case | 32-bit | 24-bit |
+|---|---:|---:|
+| 100k moves at 1,000 board, history only | 1.32 MB, 14 B/move | 1.23 MB, 13 B/move |
+| 100k moves at 1,000 board, timing | 43.1 µs/move | 43.5 µs/move |
+
+Unconditional 3-byte indices would cap the board at 4,096 and save only
+1 B/move, so the wide fallback is the useful form.
+
+### 12. Wall-node recycling
+
+A removed stone used to leave its union-find node behind until a later sweep.
+Every place/undo cycle therefore grew `nextWallNode` and the backing arrays,
+even when the live board did not change. Nodes now go on a free list when
+cleanup proves no live stone's parent chain reaches them:
+
+- `removeStone()` frees an isolated root immediately (root of size 1 has no
+  children and no live component).
+- `sweepWalls()` frees every unreachable node it clears.
+- `restoreStones()` takes free ids first, then fresh contiguous ids. The batch
+  restore still uses the global wall arrays for its local union-find, with a
+  high-bit marker in `wallRootPlayer` to tell restored nodes from live ones.
+- `wallsAreStale()` also triggers on `nextWallNode - freeWallCount`, so a
+  capture undo/redo cycle that keeps `wallEntries` constant still sweeps and
+  recycles ids.
+
+| case | before | after |
+|---|---:|---:|
+| 100k live + 200k place/undo: wall capacity | 524,288 nodes | 131,072 nodes |
+| same: buffer growth / next node id | +9.84 MB, 300,001 | +0.13 MB, 100,002 |
+| same: time per place/undo | ~65.5 µs | ~65–66 µs |
+| 200k live + 8×(100k-victim close/undo): capacity | 2,097,152 nodes | 524,288 nodes |
+| same: buffer growth / next node id | +39.1 MB, 1,105,681 | +2.0 MB, 502,743 |
+| same: time per close/undo | 158.9 ms | 169.1 ms (+6%) |
+| 100k-victim capture: close / undo | 54–83 / 88–102 ms | 60–88 / 86–109 ms |
+
+The capture close/undo ranges are unchanged within run-to-run noise. The
+close/undo churn pays ~6% more time for a 4× smaller wall array and ~20× less
+buffer growth, because cleanup now runs often enough to recycle the captured
+ids instead of letting them accumulate.
+
+### 13. Replay/checkpoint undo (rejected)
+
+A checkpoint design stores a full board snapshot every K moves and replays up
+to K moves to undo. The prototype stores index + player per stone (5 B) plus
+the move list (5 B/move); restoring a 50k-stone checkpoint with `setStone`
+takes 234 ms, before replay.
+
+| checkpoint every | checkpoint + move list | measured undo |
+|---:|---:|---:|
+| 100 moves | 239.1 MB | 245.7 ms |
+| 500 moves | 48.4 MB | 254.5 ms |
+| 1,000 moves | 24.6 MB | 271.7 ms |
+| 5,000 moves | 5.5 MB | 395.4 ms |
+| 10,000 moves | 3.1 MB | 537.0 ms |
+
+Packed history for the same 100k moves is 1.3 MB and undo is ~0.1 ms for a
+normal move, ~90 ms for a 100k-victim capture. Even the smallest checkpoint
+interval is ~190× the history memory, and every interval is 245 ms or more per
+undo. Rejected: it loses unlimited undo and is worse on both axes.
+
+### Round-2 memory envelope
+
+Measured on the same Node harness, heap + array buffers:
+
+| case | heap + buffers | RSS | time |
+|---|---:|---:|---:|
+| 100k played moves, 10k board | 11.3 MB | 72 MB | 3.1 s (30.8 µs/move) |
+| 1.3M played moves | 92.1 MB (74 B/move) | 167 MB | 40.1 s (30.8 µs/move) |
+| 5M played moves | 346.1 MB (73 B/move) | 423 MB | 153.5 s (30.7 µs/move) |
+| 856k scattered stones, no history | 45.7 MB (8.6 heap + 37.1 buffers) | 122 MB | — |
+| 100k-victim capture | history 0.52–0.58 MB | — | close 60–88 ms, undo 86–109 ms |
+
+Per-move cost settles around 58–74 B/move once the wall and history arrays are
+sized for the current game; the wall arrays dominate and step at powers of
+two. 5M moves is measured, not extrapolated. A 10M-move game should land near
+0.7 GB, 20M near 1.4 GB, and a desktop tab reaches a few GB around 30–50M;
+mobile stays around 5–10M. Undo remains unlimited, and the board extent is
+still 94,000,000.
+
 ## Update: 94,000,000 cap
 
 Four later changes remove the remaining extent limits:
@@ -776,27 +890,69 @@ These are Node numbers with a fake canvas. A real browser adds raster cost, and
 a mid-range phone runs this JavaScript perhaps 2–3× slower, so read the table
 as a desktop best case and halve the stone budgets for mobile.
 
-## Deferred: spill history to IndexedDB
+## Measured: spill history to IndexedDB (rejected)
 
-Not implemented. Packed history now costs 17 B per ordinary move and ~6.8 B per
-captured stone, so 100,000 random moves cost ~1.7 MB; one 100,000-stone capture
-record costs ~0.65 MB. Whole-game cost including stones and walls is 44 B per
-played move, so 100,000 moves cost ~9 MB. Spilling older records to IndexedDB
-would save at most a few MB and only in marathon games, so it is even less
-attractive than before.
+IndexedDB is a browser-provided, per-origin, asynchronous transactional
+key-value store. Values are copied with structured clone, so one page can be a
+single `ArrayBuffer` of packed history; keys are page numbers; an index is
+optional because access is append + reverse read. A spill design would keep
+the newest N moves in memory and write older pages to disk. Undo past the
+boundary would fetch one page, so `undo()` becomes asynchronous.
 
-If it is ever needed, the shape is: keep the newest N moves in memory, write
-older records to IndexedDB in pages of 1,000–10,000, store compact typed
-columns instead of JS objects, and preload the next page when undo approaches
-the boundary. Undo then becomes async, needs a pending UI state, and must
-cancel safely if the player moves again while a page loads. IndexedDB can fail
-from quota, private mode, eviction, or a second tab, so disk history must stay
-best-effort: losing it stops undo at the boundary but must never corrupt the
-live board.
+Measured in headless Chromium 159 on Linux, 5M moves, 13 B/move (4-byte index),
+incompressible payload, one transaction per page, durability `relaxed`:
 
-Do the cap first. IndexedDB only pays off if players routinely undo past the
-cap, and the async hydration cost lands on the one interaction that must feel
-instant.
+| page moves | page bytes | write p50 / p95 | read p50 / p95 |
+|---:|---:|---:|---:|
+| 4,096 | 53 KB | 0.2 / 0.3 ms | 0.2 / 0.3 ms |
+| 16,384 | 213 KB | 0.4 / 0.7 ms | 0.4 / 1.3 ms |
+| 65,536 | 852 KB | 1.2 / 1.9 ms | 1.3 / 1.9 ms |
+| 100k-victim capture | 500 KB | 0.8 / 1.2 ms | 0.9 / 1.5 ms |
+
+Default durability was not slower here (0.2 / 0.4 ms at 4,096), but relaxed
+is the honest choice for a best-effort undo cache. One transaction for 200
+pages was 1.4× faster than 200 separate transactions, but a live game cannot
+hold one transaction open for millions of moves.
+
+| 5M moves, page size | pages | logical | total write | write p95 | read p95 | storage delta |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4,096 wide | 1,221 | 62.0 MiB | 204 ms | 0.3 ms | 0.4 ms | 62.6 MiB |
+| 16,384 wide | 306 | 62.2 MiB | 135 ms | 0.7 ms | 1.3 ms | 62.3 MiB |
+| 16,384 narrow | 306 | 57.4 MiB | 139 ms | 0.7 ms | 1.3 ms | 57.5 MiB |
+
+Storage accounting was 1:1 with the packed bytes; the profile reported a
+~10 GB quota. Writes total 135–204 ms across 5M moves, about 27–41 ns/move,
+and one write lands every 4,096–16,384 moves. IndexedDB is not the bottleneck.
+
+The problem is the benefit:
+
+| game | history bytes | total heap + buffers | keep newest 100k, save |
+|---:|---:|---:|---:|
+| 1M moves | 12.4 MiB | 58.1 MiB | 11.2 MiB (19%) |
+| 5M moves | 62.0 MiB | 346.1 MiB | 60.8 MiB (18%) |
+| 10M moves (estimate) | 124 MiB | ~692 MiB | ~123 MiB (18%) |
+
+History stays ~18% of the game because wall nodes and rows grow with moves
+too. At 5M the wall arrays alone are 208 MiB and are read on every move, so
+they cannot be spilled. A 60 MiB saving does not move the game into a new
+memory class; on desktop it is noise, and on mobile 346 → 285 MiB is still
+too close to the tab limit.
+
+The complexity is not the page write. It is async undo (pending UI, rapid
+undo, cancellation), loading a page and remapping capture offsets, deleting
+stale pages when the player branches after undo, prefetching the next page
+before the boundary, and isolating tabs that share an origin. IndexedDB can
+also fail from quota, private mode, eviction, or corruption; losing a page must
+stop undo at that boundary without touching the live board. Finally, the game
+does not save the board, so persistence across reloads is unused: the disk
+copy exists only to save RAM during one session.
+
+Verdict: not worth implementing for memory alone. Revisit if the game gains
+save/resume (then IndexedDB pays for persistence, and history can ride along)
+or if wall memory drops enough that history becomes a large fraction of the
+total. If it is implemented then, use 16K-move pages, one `ArrayBuffer` per
+page, `relaxed` durability, keep the newest two pages, and prefetch the next
+page before undo reaches the boundary.
 
 ## How to run
 

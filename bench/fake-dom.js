@@ -227,6 +227,10 @@ function install() {
     "board-spacer", "coord-x", "coord-y", "hud", "controls", "controls-tab",
     "scores", "scores-tab", "leader-dot", "scores-list", "leader-line",
     "history", "history-tab", "history-line", "history-list",
+    "prefs", "prefs-open", "prefs-close", "prefs-reset", "prefs-error",
+    "theme-system-note", "binding-up", "binding-down", "binding-left",
+    "binding-right", "binding-place", "binding-undo", "binding-pan-up",
+    "binding-pan-down", "binding-pan-left", "binding-pan-right",
   ];
   for (const id of ids) {
     const tag = id === "board" ? "canvas" : "div";
@@ -238,13 +242,18 @@ function install() {
   }
 
   // Inputs need input-like tags for instanceof checks in key handlers.
-  for (const id of ["players", "board-size", "coord-x", "coord-y"]) {
+  for (const id of ["players", "board-size", "coord-x", "coord-y",
+    "theme-system", "theme-light", "theme-dark"]) {
     const el = makeElement("input");
     el.id = id;
     elements.set(id, el);
   }
   for (const id of ["undo", "clear", "players-dec", "players-inc",
-    "board-dec", "board-inc", "controls-tab", "scores-tab", "history-tab"]) {
+    "board-dec", "board-inc", "controls-tab", "scores-tab", "history-tab",
+    "prefs-open", "prefs-close", "prefs-reset", "binding-up",
+    "binding-down", "binding-left", "binding-right", "binding-place",
+    "binding-undo", "binding-pan-up", "binding-pan-down", "binding-pan-left",
+    "binding-pan-right"]) {
     const el = makeElement("button");
     el.id = id;
     elements.set(id, el);
@@ -253,13 +262,18 @@ function install() {
   const document = {
     activeElement: null,
     body: makeElement("body"),
+    listeners: new Map(),
     getElementById(id) {
       return elements.get(id) ?? null;
     },
     createElement(tag) {
       return makeElement(tag);
     },
-    addEventListener() {},
+    addEventListener(type, fn) {
+      const list = this.listeners.get(type) ?? [];
+      list.push(fn);
+      this.listeners.set(type, list);
+    },
   };
 
   const window = {

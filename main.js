@@ -61,7 +61,7 @@ const LINE_WIDTH_CSS = 0.8;    // grid line thickness, in css pixels
 const LINK_WIDTH_RATIO = 0.10; // link thickness, fraction of spacing
 const DRAG_TOLERANCE_PX = 8;   // press-to-release drift before it is a drag
 const DRAG_TOLERANCE_SQ = DRAG_TOLERANCE_PX * DRAG_TOLERANCE_PX;
-const ARROW_STEP_CELLS = 3;    // cells panned per shift+arrow press
+const ARROW_STEP_CELLS = 3;    // cells panned per pan-key press
 const CURSOR_MARGIN_CELLS = 1; // keep the keyboard cursor this far from the edge
 const DPR_MAX = 2;             // cap backing-store pixels on 3x phone screens
 
@@ -150,8 +150,35 @@ const WALL_DY = [-1, -1, -1, 0, 0, 1, 1, 1];
 // rebuild that walks stones in row-major order visits every edge exactly once.
 const WALL_EARLIER = 4;
 // Union-find nodes are per insertion, not per cell, so a re-used cell never
-// inherits the wall of a stone that was removed from it.
+// inherits the wall of a stone that was removed from it. A node is only put on
+// the free list once no live stone's parent chain can reach it, so reusing the
+// id cannot attach a new stone to an old wall.
 let nextWallNode = 1;
+let freeWallNodes = new Int32Array(0);
+let freeWallCount = 0;
+
+function pushFreeWallNode(node) {
+  if (freeWallCount === freeWallNodes.length) {
+    const next = new Int32Array(freeWallNodes.length === 0
+      ? 1024 : freeWallNodes.length * 2);
+    next.set(freeWallNodes);
+    freeWallNodes = next;
+  }
+  freeWallNodes[freeWallCount] = node;
+  freeWallCount += 1;
+}
+
+function popFreeWallNode() {
+  if (freeWallCount === 0) {
+    return 0;
+  }
+  freeWallCount -= 1;
+  return freeWallNodes[freeWallCount];
+}
+
+function clearFreeWallNodes() {
+  freeWallCount = 0;
+}
 
 // Flood uses 4-way moves against flat row-major indices in enclosure().
 // Stones sit on crossings, so a diagonal chain still blocks the flood: there
@@ -187,6 +214,11 @@ const historyEl = document.getElementById("history");
 const historyTab = document.getElementById("history-tab");
 const historyLine = document.getElementById("history-line");
 const historyList = document.getElementById("history-list");
+const prefsOpenBtn = document.getElementById("prefs-open");
+const prefsDialog = document.getElementById("prefs");
+const prefsResetBtn = document.getElementById("prefs-reset");
+const prefsError = document.getElementById("prefs-error");
+const themeSystemNote = document.getElementById("theme-system-note");
 
 // The visible frame, composed (grid, territory, links, stones). It is the
 // size of the canvas, not the board. Hovering only blits this layer and draws
@@ -230,15 +262,19 @@ const state = {
   rows: new Map(), // y -> { xs: number[], players: number[] }, sorted by x
   // Undo history is packed into typed columns: one slot per move plus a flat
   // pool of captured stones. A JS record per move cost ~106 B; this is ~13 B
-  // plus 5 B per captured stone.
-  historyIndex: new Uint32Array(0),
-  historyPlayer: new Uint8Array(0),
-  historyRemovedStart: new Uint32Array(0),
-  historyRemovedCount: new Uint32Array(0),
-  historyRemovedIndex: new Uint32Array(0),
-  historyRemovedPlayer: new Uint8Array(0),
+  // plus 5 B per captured stone. Columns are arrays of fixed-size chunks, so
+  // a long game does not pay the doubling slack of one giant typed array.
+  historyIndex: [],
+  historyPlayer: [],
+  historyRemovedStart: [],
+  historyRemovedCount: [],
+  historyRemovedIndex: [],
+  historyRemovedPlayer: [],
   historyLength: 0,
   historyRemovedLength: 0,
+  // A move index fits in 24 bits while dim <= 4096 (4096^2 = 2^24), so small
+  // boards store three bytes per move and huge boards fall back to four.
+  historyIndexNarrow: true,
   historyRevision: 0, // bumped whenever the move list changes, for the panel
   dim: BOARD_SIZE_DEFAULT,  // crossings per row and column
   playerCount: 2,
@@ -391,11 +427,15 @@ function stoneAt(x, y) {
 function insertStone(x, y, player) {
   invariant(player >= 1 && player <= MAX_PLAYERS, "bad stone player");
 
-  // Every insertion gets a fresh union-find node. A cell can be emptied and
-  // later filled by another player, so the cell index is not a safe node id:
-  // reusing it would attach the new stone to the removed stone's old wall.
-  const node = nextWallNode;
-  nextWallNode += 1;
+  // Prefer a node that cleanup proved unreachable, otherwise take a fresh id.
+  // A cell can be emptied and later filled by another player, so the cell
+  // index is not a safe node id: reusing it would attach the new stone to the
+  // removed stone's old wall.
+  let node = popFreeWallNode();
+  if (node === 0) {
+    node = nextWallNode;
+    nextWallNode += 1;
+  }
   invariant(node < 0xffffffff, "wall node id overflow");
   ensureWallCapacity(node);
   let row = state.rows.get(y);
@@ -609,6 +649,8 @@ function resetBoardState() {
   invariant(state.dim > 0, "board must have at least one crossing");
   state.rows.clear();
   nextWallNode = 1;
+  clearFreeWallNodes();
+  freeWallNodes = new Int32Array(0); // do not carry a huge old free list
   state.wallParent = new Uint32Array(0);
   state.wallSize = new Uint32Array(0);
   state.wallBox = new Int32Array(0);
@@ -1124,6 +1166,7 @@ function rebuildWalls() {
   state.wallRootPlayer = new Uint8Array(0);
   state.wallEntries = 0;
   nextWallNode = 1;
+  clearFreeWallNodes();
   for (const roots of state.playerCycles) {
     roots.clear();
   }
@@ -1215,6 +1258,7 @@ function sweepWalls() {
       const player = rootPlayer[node];
       rootPlayer[node] = 0;
       state.wallEntries -= 1;
+      pushFreeWallNode(node);
       if (up !== node) {
         continue;
       }
@@ -1254,16 +1298,25 @@ function compactWalls() {
     rebuildWalls();
   } else {
     sweepWalls();
-    if (wallsAreStale()) {
+    // A sweep recycles node ids, so only stale entries can justify the more
+    // expensive rebuild. Checking wallsAreStale() here would rebuild right
+    // after every successful sweep on a high-id undo/redo cycle.
+    if (state.wallEntries > state.stoneTotal * 2 + 256) {
       rebuildWalls();
     }
   }
 }
 
-// Threshold for wall cleanup: stale entries may be twice the live stone count
-// plus a small floor, so a tiny board does not sweep every few captures.
+// Threshold for wall cleanup. Stale entries may be twice the live stone count
+// plus a small floor, so a tiny board does not sweep every few captures. Node
+// ids also count: an undo/redo cycle can re-add every captured stone without
+// changing `wallEntries`, and without this check `nextWallNode` (and the
+// backing arrays) would grow forever. Free ids are subtracted because sweep
+// turns dead ids into reusable nodes; without that, every later cleanup would
+// trigger again on the same high id even though nothing needs to grow.
 function wallsAreStale() {
-  return state.wallEntries > state.stoneTotal * 2 + 256;
+  return state.wallEntries > state.stoneTotal * 2 + 256 ||
+    nextWallNode - freeWallCount > state.stoneTotal * 2 + 4096;
 }
 
 // First index in a sorted row whose x is at least `value`.
@@ -2496,9 +2549,9 @@ let renderedScores = null;
 // The leader header is always on screen, even when the score rows behind it
 // are collapsed, so it is updated from the territory pass as well.
 function updateLeader(scores) {
-  const ranked = scores
-    .slice()
-    .sort((a, b) => b.points - a.points || a.player - b.player);
+  const ranked = scores.toSorted(
+    (a, b) => b.points - a.points || a.player - b.player,
+  );
   const best = ranked[0];
 
   leaderLine.textContent = best.points > 0
@@ -2578,9 +2631,10 @@ function updateHistoryLine() {
     return;
   }
   const last = count - 1;
+  const index = historyMoveIndex(last);
   historyLine.textContent =
-    `${playerName(state.historyPlayer[last])} · ` +
-    `${coordX(state.historyIndex[last])}, ${coordY(state.historyIndex[last])}`;
+    `${playerName(historyMovePlayer(last))} · ` +
+    `${coordX(index)}, ${coordY(index)}`;
 }
 
 // One history row: newest first, so the recent placements are visible without
@@ -2656,7 +2710,7 @@ function renderHistory() {
       state.historyRevision === renderedHistoryRevision + 1) {
     const last = moves - 1;
     historyList.prepend(historyRow(
-      state.historyIndex[last], state.historyPlayer[last], last));
+      historyMoveIndex(last), historyMovePlayer(last), last));
     renderedHistoryCount = moves;
     renderedHistoryRevision = state.historyRevision;
     trimHistory(moves);
@@ -2667,7 +2721,7 @@ function renderHistory() {
   const rows = new Array(shown + (moves > shown ? 1 : 0));
   let at = 0;
   for (let i = moves - 1; i >= moves - shown; i -= 1) {
-    rows[at] = historyRow(state.historyIndex[i], state.historyPlayer[i], i);
+    rows[at] = historyRow(historyMoveIndex(i), historyMovePlayer(i), i);
     at += 1;
   }
   if (moves > shown) {
@@ -3828,8 +3882,25 @@ function removeStone(index) {
   // Removing one stone can only shrink that component's sealed set. Drop its
   // cache; every other component's flood is independent of this stone.
   const sealedCache = state.componentSealed[player];
+  const root = state.wallParent[node] === node ? node : wallRootOf(node);
   if (sealedCache.size !== 0) {
-    sealedCache.delete(wallRootOf(node));
+    sealedCache.delete(root);
+  }
+  // An isolated root has no children and no live stone in its component, so
+  // its id can be reused at once. Nodes inside a larger component stay until
+  // sweepWalls proves that no live chain reaches them.
+  if (root === node && state.wallSize[node] === 1) {
+    state.wallParent[node] = 0;
+    state.wallSize[node] = 0;
+    const at = node * 4;
+    state.wallBox[at] = 0;
+    state.wallBox[at + 1] = 0;
+    state.wallBox[at + 2] = 0;
+    state.wallBox[at + 3] = 0;
+    state.wallCycle[node] = 0;
+    state.wallRootPlayer[node] = 0;
+    state.wallEntries -= 1;
+    pushFreeWallNode(node);
   }
   if (wallsAreStale()) {
     compactWalls();
@@ -3983,32 +4054,45 @@ function restoreStones(stones) {
 
   const dim = state.dim;
   const rows = state.rows;
-  // Restored nodes are numbered contiguously so the local union-find below can
-  // tell a restored node from an older live one with a range check.
-  const base = nextWallNode;
-  nextWallNode += count;
-  invariant(nextWallNode - 1 < 0xffffffff, "wall node id overflow");
+  // Restored nodes come from the free list first, then from fresh ids. Free
+  // ids are only published after cleanup proved no live chain reaches them,
+  // so reuse cannot attach a restored stone to an old wall. `localNodes[k]`
+  // is the node id used by stones[k].
+  const reused = Math.min(freeWallCount, count);
+  const localNodes = new Int32Array(count);
+  for (let k = 0; k < reused; k += 1) {
+    localNodes[k] = popFreeWallNode();
+  }
+  if (reused < count) {
+    const base = nextWallNode;
+    nextWallNode += count - reused;
+    invariant(nextWallNode - 1 < 0xffffffff, "wall node id overflow");
+    for (let k = reused; k < count; k += 1) {
+      localNodes[k] = base + (k - reused);
+    }
+  }
   ensureWallCapacity(nextWallNode - 1);
   const parent = state.wallParent;
   const sizes = state.wallSize;
   const boxes = state.wallBox;
-  const localParent = new Int32Array(count);
-  const localSize = new Int32Array(count);
-  const localCycle = new Uint8Array(count);
-  const localMinX = new Int32Array(count);
-  const localMaxX = new Int32Array(count);
-  const localMinY = new Int32Array(count);
-  const localMaxY = new Int32Array(count);
+  const cycles = state.wallCycle;
+  const rootPlayers = state.wallRootPlayer;
+  // The high bit marks a node inside this restore batch. Player ids are below
+  // 128, so the marker cannot collide with a live root's player.
+  const RESTORED = 0x80;
   for (let k = 0; k < count; k += 1) {
     const index = stones[k].index;
     const x = index % dim;
     const y = (index - x) / dim;
-    localParent[k] = k;
-    localSize[k] = 1;
-    localMinX[k] = x;
-    localMaxX[k] = x;
-    localMinY[k] = y;
-    localMaxY[k] = y;
+    const node = localNodes[k];
+    parent[node] = node;
+    sizes[node] = 1;
+    boxes[node * 4] = x;
+    boxes[node * 4 + 1] = x;
+    boxes[node * 4 + 2] = y;
+    boxes[node * 4 + 3] = y;
+    cycles[node] = 0;
+    rootPlayers[node] = stones[k].player | RESTORED;
   }
 
   const affectedRows = [];
@@ -4049,7 +4133,7 @@ function restoreStones(stones) {
       invariant(read >= oldCount || oldXs[read] !== x,
         "batch restore duplicates a stone");
       const player = stone.player;
-      const node = base + i;
+      const node = localNodes[i];
       xs[write] = x;
       players[write] = player;
       nodes[write] = node;
@@ -4074,16 +4158,16 @@ function restoreStones(stones) {
     rows.set(y, { xs, players, nodes, n: write });
   }
 
-  // Local union-find over just the restored stones. Restoring a captured
-  // interior used to call connectWall per stone, and every call paid several
-  // Map lookups on the global union-find. Adjacent restored stones can be
-  // unioned here in typed arrays; only edges to stones that were already live
-  // touch the global wall map.
+  // Local union-find over just the restored stones, stored directly in the
+  // global wall arrays. Restoring a captured interior used to call connectWall
+  // per stone, and every call paid several Map lookups on the global
+  // union-find. Adjacent restored stones are unioned here; only edges to
+  // stones that were already live touch an old component.
   function localRoot(node) {
     let root = node;
-    while (localParent[root] !== root) {
-      localParent[root] = localParent[localParent[root]];
-      root = localParent[root];
+    while (parent[root] !== root) {
+      parent[root] = parent[parent[root]];
+      root = parent[root];
     }
     return root;
   }
@@ -4092,21 +4176,27 @@ function restoreStones(stones) {
     let ra = localRoot(a);
     let rb = localRoot(b);
     if (ra === rb) {
-      localCycle[ra] = 1;
+      cycles[ra] = 1;
       return;
     }
-    if (localSize[ra] < localSize[rb]) {
+    if (sizes[ra] < sizes[rb]) {
       const swap = ra;
       ra = rb;
       rb = swap;
     }
-    localParent[rb] = ra;
-    localSize[ra] += localSize[rb];
-    localCycle[ra] |= localCycle[rb];
-    if (localMinX[rb] < localMinX[ra]) localMinX[ra] = localMinX[rb];
-    if (localMaxX[rb] > localMaxX[ra]) localMaxX[ra] = localMaxX[rb];
-    if (localMinY[rb] < localMinY[ra]) localMinY[ra] = localMinY[rb];
-    if (localMaxY[rb] > localMaxY[ra]) localMaxY[ra] = localMaxY[rb];
+    parent[rb] = ra;
+    sizes[ra] += sizes[rb];
+    cycles[ra] |= cycles[rb];
+    if (boxes[rb * 4] < boxes[ra * 4]) boxes[ra * 4] = boxes[rb * 4];
+    if (boxes[rb * 4 + 1] > boxes[ra * 4 + 1]) {
+      boxes[ra * 4 + 1] = boxes[rb * 4 + 1];
+    }
+    if (boxes[rb * 4 + 2] < boxes[ra * 4 + 2]) {
+      boxes[ra * 4 + 2] = boxes[rb * 4 + 2];
+    }
+    if (boxes[rb * 4 + 3] > boxes[ra * 4 + 3]) {
+      boxes[ra * 4 + 3] = boxes[rb * 4 + 3];
+    }
   }
 
   const boundaryLocal = [];
@@ -4117,21 +4207,19 @@ function restoreStones(stones) {
     if (playerA !== playerB) {
       return;
     }
-    const a = nodeA - base;
-    const b = nodeB - base;
-    const aRestored = a >= 0 && a < count;
-    const bRestored = b >= 0 && b < count;
+    const aRestored = (rootPlayers[nodeA] & RESTORED) !== 0;
+    const bRestored = (rootPlayers[nodeB] & RESTORED) !== 0;
     if (!aRestored && !bRestored) {
       return;
     }
     if (aRestored && bRestored) {
-      unionLocal(a, b);
+      unionLocal(nodeA, nodeB);
     } else if (aRestored) {
-      boundaryLocal.push(a);
+      boundaryLocal.push(nodeA);
       boundaryExternal.push(nodeB);
       boundaryPlayer.push(playerA);
     } else {
-      boundaryLocal.push(b);
+      boundaryLocal.push(nodeB);
       boundaryExternal.push(nodeA);
       boundaryPlayer.push(playerA);
     }
@@ -4193,61 +4281,58 @@ function restoreStones(stones) {
     }
   }
 
-  // Publish one global entry per restored node. Non-roots point at their local
-  // root; only the root carries size and box.
-  for (let k = 0; k < count; k += 1) {
-    const node = base + k;
-    const root = localRoot(k);
-    if (root === k) {
-      parent[node] = node;
-      sizes[node] = localSize[k];
-      boxes[node * 4] = localMinX[k];
-      boxes[node * 4 + 1] = localMaxX[k];
-      boxes[node * 4 + 2] = localMinY[k];
-      boxes[node * 4 + 3] = localMaxY[k];
-      state.wallRootPlayer[node] = stones[k].player;
+  state.wallEntries += count;
+
+  // Attach each restored component to the live components it touches. Most
+  // restored components have no boundary at all; a dense captured interior
+  // usually has one. Boundary roots are resolved before any merge so the
+  // grouping key stays a local root.
+  const boundaryRoots = new Int32Array(boundaryLocal.length);
+  for (let k = 0; k < boundaryLocal.length; k += 1) {
+    boundaryRoots[k] = localRoot(boundaryLocal[k]);
+  }
+  const attached = new Map();
+  for (let k = 0; k < boundaryLocal.length; k += 1) {
+    const root = boundaryRoots[k];
+    const external = wallRootOf(boundaryExternal[k]);
+    const current = attached.get(root);
+    if (current === undefined) {
+      attached.set(root, external);
+    } else if (current === external) {
+      markWallCycle(external, boundaryPlayer[k]);
     } else {
-      parent[node] = base + root;
+      attached.set(root, mergeWallRoots(current, external, boundaryPlayer[k]));
+    }
+  }
+
+  // Publish one global entry per restored node. Non-roots point at the
+  // surviving root and drop their temporary size, box and cycle. A root also
+  // clears the restore marker and attaches to any live root it touches.
+  for (let k = 0; k < count; k += 1) {
+    const node = localNodes[k];
+    const root = localRoot(node);
+    if (root !== node) {
+      parent[node] = root;
       sizes[node] = 0;
       boxes[node * 4] = 0;
       boxes[node * 4 + 1] = 0;
       boxes[node * 4 + 2] = 0;
       boxes[node * 4 + 3] = 0;
-      state.wallRootPlayer[node] = 0;
-    }
-  }
-  state.wallEntries += count;
-
-  // Attach each restored component to the live components it touches. Most
-  // restored components have no boundary at all; a dense captured interior
-  // usually has one.
-  const attached = new Int32Array(count);
-  attached.fill(-1);
-  for (let k = 0; k < boundaryLocal.length; k += 1) {
-    const root = localRoot(boundaryLocal[k]);
-    const external = wallRootOf(boundaryExternal[k]);
-    const current = attached[root];
-    if (current === -1) {
-      attached[root] = external;
-    } else if (current === external) {
-      markWallCycle(external, boundaryPlayer[k]);
-    } else {
-      attached[root] = mergeWallRoots(current, external, boundaryPlayer[k]);
-    }
-  }
-  for (let k = 0; k < count; k += 1) {
-    if (localRoot(k) !== k) {
+      cycles[node] = 0;
+      rootPlayers[node] = 0;
       continue;
     }
     const player = stones[k].player;
-    let root = base + k;
-    const external = attached[k];
-    if (external !== -1) {
-      root = mergeWallRoots(root, external, player);
+    const external = attached.get(node);
+    const hadCycle = cycles[node] !== 0;
+    let finalRoot = node;
+    if (external !== undefined) {
+      finalRoot = mergeWallRoots(node, external, player);
     }
-    if (localCycle[k] !== 0) {
-      markWallCycle(root, player);
+    if (hadCycle) {
+      markWallCycle(finalRoot, player);
     }
+    rootPlayers[finalRoot] = player;
   }
 
   state.lastCycleRoot = -1;
@@ -4267,72 +4352,119 @@ function anyPlayerDirty() {
   return false;
 }
 
-// Undo history lives in typed columns. Growing replaces the arrays, so callers
-// must not hold a reference across a push. Capacity doubles, live length is
-// `historyLength` / `historyRemovedLength`.
-const HISTORY_MIN_CAPACITY = 1024;
+// Undo history lives in typed columns split into fixed-size chunks. A chunked
+// column costs at most one partial chunk of slack, while a single doubling
+// array could reserve almost twice the live length. Accessors below are the
+// only place that translates a live index into chunk + offset.
+const HISTORY_CHUNK_SHIFT = 12;
+const HISTORY_CHUNK_SIZE = 1 << HISTORY_CHUNK_SHIFT;
+const HISTORY_CHUNK_MASK = HISTORY_CHUNK_SIZE - 1;
+// 4096^2 = 2^24, the first board side whose largest flat index no longer fits
+// in three bytes.
+const HISTORY_NARROW_MAX_DIM = 4096;
 const EMPTY_HISTORY_REMOVED = Object.freeze([]);
 
-function ensureHistoryCapacity(need) {
-  if (need <= state.historyIndex.length) {
-    return;
+function ensureHistoryMoveChunk(at) {
+  const slot = at >>> HISTORY_CHUNK_SHIFT;
+  if (state.historyIndex[slot] !== undefined) {
+    return slot;
   }
-  let next = state.historyIndex.length || HISTORY_MIN_CAPACITY;
-  while (next < need) {
-    next *= 2;
-  }
-  const length = state.historyLength;
-  const index = new Uint32Array(next);
-  index.set(state.historyIndex.subarray(0, length));
-  const player = new Uint8Array(next);
-  player.set(state.historyPlayer.subarray(0, length));
-  const removedStart = new Uint32Array(next);
-  removedStart.set(state.historyRemovedStart.subarray(0, length));
-  const removedCount = new Uint32Array(next);
-  removedCount.set(state.historyRemovedCount.subarray(0, length));
-  state.historyIndex = index;
-  state.historyPlayer = player;
-  state.historyRemovedStart = removedStart;
-  state.historyRemovedCount = removedCount;
+  state.historyIndex[slot] = state.historyIndexNarrow
+    ? new Uint8Array(HISTORY_CHUNK_SIZE * 3)
+    : new Uint32Array(HISTORY_CHUNK_SIZE);
+  state.historyPlayer[slot] = new Uint8Array(HISTORY_CHUNK_SIZE);
+  state.historyRemovedStart[slot] = new Uint32Array(HISTORY_CHUNK_SIZE);
+  state.historyRemovedCount[slot] = new Uint32Array(HISTORY_CHUNK_SIZE);
+  return slot;
 }
 
-function ensureHistoryRemovedCapacity(need) {
-  if (need <= state.historyRemovedIndex.length) {
+function ensureHistoryRemovedChunk(at) {
+  const slot = at >>> HISTORY_CHUNK_SHIFT;
+  if (state.historyRemovedIndex[slot] !== undefined) {
+    return slot;
+  }
+  state.historyRemovedIndex[slot] = new Uint32Array(HISTORY_CHUNK_SIZE);
+  state.historyRemovedPlayer[slot] = new Uint8Array(HISTORY_CHUNK_SIZE);
+  return slot;
+}
+
+function historyMoveIndex(at) {
+  const chunk = state.historyIndex[at >>> HISTORY_CHUNK_SHIFT];
+  const off = at & HISTORY_CHUNK_MASK;
+  if (!state.historyIndexNarrow) {
+    return chunk[off];
+  }
+  const p = off * 3;
+  return chunk[p] | (chunk[p + 1] << 8) | (chunk[p + 2] << 16);
+}
+
+function setHistoryMoveIndex(at, value) {
+  const slot = at >>> HISTORY_CHUNK_SHIFT;
+  const off = at & HISTORY_CHUNK_MASK;
+  const chunk = state.historyIndex[slot];
+  if (!state.historyIndexNarrow) {
+    chunk[off] = value;
     return;
   }
-  let next = state.historyRemovedIndex.length || HISTORY_MIN_CAPACITY;
-  while (next < need) {
-    next *= 2;
-  }
-  const length = state.historyRemovedLength;
-  const index = new Uint32Array(next);
-  index.set(state.historyRemovedIndex.subarray(0, length));
-  const player = new Uint8Array(next);
-  player.set(state.historyRemovedPlayer.subarray(0, length));
-  state.historyRemovedIndex = index;
-  state.historyRemovedPlayer = player;
+  const p = off * 3;
+  chunk[p] = value & 0xff;
+  chunk[p + 1] = (value >>> 8) & 0xff;
+  chunk[p + 2] = (value >>> 16) & 0xff;
 }
+
+function historyMovePlayer(at) {
+  return state.historyPlayer[at >>> HISTORY_CHUNK_SHIFT][at & HISTORY_CHUNK_MASK];
+}
+
+function historyRemovedStartAt(at) {
+  return state.historyRemovedStart[at >>> HISTORY_CHUNK_SHIFT][at & HISTORY_CHUNK_MASK];
+}
+
+function historyRemovedCountAt(at) {
+  return state.historyRemovedCount[at >>> HISTORY_CHUNK_SHIFT][at & HISTORY_CHUNK_MASK];
+}
+
+function historyRemovedIndexAt(at) {
+  return state.historyRemovedIndex[at >>> HISTORY_CHUNK_SHIFT][at & HISTORY_CHUNK_MASK];
+}
+
+function historyRemovedPlayerAt(at) {
+  return state.historyRemovedPlayer[at >>> HISTORY_CHUNK_SHIFT][at & HISTORY_CHUNK_MASK];
+}
+
+// Undo keeps the chunk high-water mark, exactly like the flat arrays did.
+// Trimming trailing chunks on every pop made place/undo churn reallocate a
+// 4-chunk block per cycle, which was far more expensive than the memory kept.
 
 // Copy one completed move into the packed columns. The temporary record is
 // discarded, so no JS object or removed-stone object survives the call.
 function pushHistory(record) {
   const at = state.historyLength;
-  ensureHistoryCapacity(at + 1);
+  const slot = ensureHistoryMoveChunk(at);
+  const off = at & HISTORY_CHUNK_MASK;
   const removed = record.removed;
   const count = removed.length;
   const start = state.historyRemovedLength;
-  ensureHistoryRemovedCapacity(start + count);
-  const removedIndex = state.historyRemovedIndex;
-  const removedPlayer = state.historyRemovedPlayer;
+  let removedSlot = -1;
+  let removedIndex = null;
+  let removedPlayer = null;
   for (let i = 0; i < count; i += 1) {
+    const pos = start + i;
+    const s = pos >>> HISTORY_CHUNK_SHIFT;
+    if (s !== removedSlot) {
+      removedSlot = ensureHistoryRemovedChunk(pos);
+      removedIndex = state.historyRemovedIndex[s];
+      removedPlayer = state.historyRemovedPlayer[s];
+    }
     const stone = removed[i];
-    removedIndex[start + i] = stone.index;
-    removedPlayer[start + i] = stone.player;
+    const o = pos & HISTORY_CHUNK_MASK;
+    removedIndex[o] = stone.index;
+    removedPlayer[o] = stone.player;
   }
-  state.historyIndex[at] = record.index;
-  state.historyPlayer[at] = record.player;
-  state.historyRemovedStart[at] = start;
-  state.historyRemovedCount[at] = count;
+  setHistoryMoveIndex(at, record.index);
+  state.historyPlayer[slot][off] = record.player;
+  state.historyRemovedStart[slot][off] = start;
+  state.historyRemovedCount[slot][off] = count;
   state.historyLength = at + 1;
   state.historyRemovedLength = start + count;
 }
@@ -4345,23 +4477,31 @@ function popHistory() {
   if (at < 0) {
     return null;
   }
-  const start = state.historyRemovedStart[at];
-  const count = state.historyRemovedCount[at];
+  const slot = at >>> HISTORY_CHUNK_SHIFT;
+  const off = at & HISTORY_CHUNK_MASK;
+  const start = state.historyRemovedStart[slot][off];
+  const count = state.historyRemovedCount[slot][off];
   let removed = EMPTY_HISTORY_REMOVED;
   if (count > 0) {
     removed = new Array(count);
-    const removedIndex = state.historyRemovedIndex;
-    const removedPlayer = state.historyRemovedPlayer;
+    let removedSlot = -1;
+    let removedIndex = null;
+    let removedPlayer = null;
     for (let i = 0; i < count; i += 1) {
-      removed[i] = {
-        index: removedIndex[start + i],
-        player: removedPlayer[start + i],
-      };
+      const pos = start + i;
+      const s = pos >>> HISTORY_CHUNK_SHIFT;
+      if (s !== removedSlot) {
+        removedSlot = s;
+        removedIndex = state.historyRemovedIndex[s];
+        removedPlayer = state.historyRemovedPlayer[s];
+      }
+      const o = pos & HISTORY_CHUNK_MASK;
+      removed[i] = { index: removedIndex[o], player: removedPlayer[o] };
     }
   }
   const record = {
-    index: state.historyIndex[at],
-    player: state.historyPlayer[at],
+    index: historyMoveIndex(at),
+    player: state.historyPlayer[slot][off],
     removed,
   };
   state.historyLength = at;
@@ -4373,12 +4513,12 @@ function resetHistory() {
   state.historyLength = 0;
   state.historyRemovedLength = 0;
   if (state.historyIndex.length > 0) {
-    state.historyIndex = new Uint32Array(0);
-    state.historyPlayer = new Uint8Array(0);
-    state.historyRemovedStart = new Uint32Array(0);
-    state.historyRemovedCount = new Uint32Array(0);
-    state.historyRemovedIndex = new Uint32Array(0);
-    state.historyRemovedPlayer = new Uint8Array(0);
+    state.historyIndex = [];
+    state.historyPlayer = [];
+    state.historyRemovedStart = [];
+    state.historyRemovedCount = [];
+    state.historyRemovedIndex = [];
+    state.historyRemovedPlayer = [];
   }
 }
 
@@ -4453,6 +4593,7 @@ function startGame(playerCount, dim) {
 
   state.playerCount = playerCount;
   state.dim = dim;
+  state.historyIndexNarrow = dim <= HISTORY_NARROW_MAX_DIM;
   resetHistory();
   state.historyRevision += 1;
   state.turn = 1;
@@ -4672,6 +4813,9 @@ for (const input of [coordXInput, coordYInput]) {
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
+      if (event.isComposing || event.keyCode === 229) {
+        return; // Enter confirmed an IME candidate, not the coordinate
+      }
       applyCoordInputs();
       input.blur();
     }
@@ -4757,41 +4901,435 @@ boardWrap.addEventListener("scroll", () => {
   scheduleDraw();
 }, { passive: true });
 
-// Arrow keys walk the keyboard cursor one crossing at a time, Enter or Space
-// places, and Shift+arrow pans. Number fields keep their native arrow
-// behaviour (stepping the value), so typing a board size is never hijacked.
-const ARROW_PAN = {
-  ArrowUp: [0, -1],
-  ArrowDown: [0, 1],
-  ArrowLeft: [-1, 0],
-  ArrowRight: [1, 0],
+// ---- preferences -----------------------------------------------------
+
+const STORAGE_THEME = "dotdot.theme";
+const STORAGE_BINDINGS = "dotdot.keybindings.v1";
+const KEY_ACTIONS = [
+  "up", "down", "left", "right",
+  "pan-up", "pan-down", "pan-left", "pan-right",
+  "place", "undo",
+];
+const MOVE_ACTIONS = ["up", "down", "left", "right"];
+const MOVE_DELTA = {
+  up: [0, -1],
+  down: [0, 1],
+  left: [-1, 0],
+  right: [1, 0],
+};
+const PAN_ACTIONS = ["pan-up", "pan-down", "pan-left", "pan-right"];
+const PAN_DELTA = {
+  "pan-up": [0, -1],
+  "pan-down": [0, 1],
+  "pan-left": [-1, 0],
+  "pan-right": [1, 0],
+};
+const ACTION_LABELS = {
+  up: "Move up",
+  down: "Move down",
+  left: "Move left",
+  right: "Move right",
+  "pan-up": "Pan up",
+  "pan-down": "Pan down",
+  "pan-left": "Pan left",
+  "pan-right": "Pan right",
+  place: "Place stone",
+  undo: "Undo",
+};
+const MODIFIER_KEYS = new Set([
+  "Alt", "AltGraph", "CapsLock", "Control", "Fn", "Meta", "OS", "Shift",
+]);
+
+function makeBinding(key, ctrl = false, meta = false, alt = false,
+  shift = false) {
+  return { key, ctrl, meta, alt, shift };
+}
+
+const DEFAULT_BINDINGS = {
+  up: makeBinding("ArrowUp"),
+  down: makeBinding("ArrowDown"),
+  left: makeBinding("ArrowLeft"),
+  right: makeBinding("ArrowRight"),
+  "pan-up": makeBinding("ArrowUp", false, false, false, true),
+  "pan-down": makeBinding("ArrowDown", false, false, false, true),
+  "pan-left": makeBinding("ArrowLeft", false, false, false, true),
+  "pan-right": makeBinding("ArrowRight", false, false, false, true),
+  place: makeBinding(" "),
+  undo: makeBinding("z", true, true),
 };
 
-document.addEventListener("keydown", (event) => {
-  const pan = ARROW_PAN[event.key];
-  if (pan !== undefined) {
-    // Fields and browser shortcuts keep their own arrow-key behaviour.
-    if (event.target instanceof HTMLInputElement ||
-        event.ctrlKey || event.metaKey || event.altKey) {
-      return;
-    }
-    event.preventDefault();
-    if (event.shiftKey) {
-      panBoard(pan[0], pan[1]);
-    } else {
-      moveCursor(pan[0], pan[1]);
-    }
+function cloneBinding(source) {
+  return makeBinding(source.key, source.ctrl, source.meta, source.alt,
+    source.shift);
+}
+
+// localStorage can throw in private mode or a sandbox; settings still apply.
+function readStored(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Applying the setting matters more than persisting it.
+  }
+}
+
+function removeStored(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Same as writeStored.
+  }
+}
+
+const themeMeta = document.querySelector?.('meta[name="color-scheme"]') ??
+  null;
+const systemDark = window.matchMedia?.("(prefers-color-scheme: dark)") ??
+  null;
+const themeRadios = ["theme-system", "theme-light", "theme-dark"]
+  .map((id) => document.getElementById(id))
+  .filter((radio) => radio !== null);
+
+let theme = "system";
+let bindings = {};
+
+function normalizeTheme(value) {
+  return value === "light" || value === "dark" ? value : "system";
+}
+
+function syncThemeControls() {
+  for (const radio of themeRadios) {
+    radio.checked = radio.value === theme;
+  }
+  if (themeSystemNote === null) {
     return;
   }
+  if (systemDark === null || theme !== "system") {
+    themeSystemNote.textContent = "";
+  } else {
+    themeSystemNote.textContent = systemDark.matches
+      ? "System is currently dark."
+      : "System is currently light.";
+  }
+}
 
-  if (event.key === " " || event.key === "Enter") {
-    // A focused control keeps its own activation key.
-    if (event.target instanceof HTMLInputElement ||
-        event.target instanceof HTMLButtonElement) {
-      return;
+function applyTheme(next) {
+  theme = normalizeTheme(next);
+  if (theme === "system") {
+    removeStored(STORAGE_THEME);
+  } else {
+    writeStored(STORAGE_THEME, theme);
+  }
+  if (themeMeta !== null) {
+    themeMeta.content = theme === "system" ? "light dark" : theme;
+  }
+  syncThemeControls();
+}
+
+function isBinding(value) {
+  return value !== null && typeof value === "object" &&
+    typeof value.key === "string" && value.key.length > 0 &&
+    typeof value.ctrl === "boolean" &&
+    typeof value.meta === "boolean" &&
+    typeof value.alt === "boolean" &&
+    typeof value.shift === "boolean";
+}
+
+function loadBindings() {
+  const loaded = {};
+  for (const action of KEY_ACTIONS) {
+    loaded[action] = cloneBinding(DEFAULT_BINDINGS[action]);
+  }
+  const raw = readStored(STORAGE_BINDINGS);
+  if (raw === null) {
+    return loaded;
+  }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return loaded;
+  }
+  if (parsed === null || typeof parsed !== "object") {
+    return loaded;
+  }
+  for (const action of KEY_ACTIONS) {
+    if (isBinding(parsed[action])) {
+      loaded[action] = cloneBinding(parsed[action]);
     }
+  }
+  return loaded;
+}
+
+function saveBindings() {
+  writeStored(STORAGE_BINDINGS, JSON.stringify(bindings));
+}
+
+function keyLabel(key) {
+  switch (key) {
+    case " ":
+      return "Space";
+    case "ArrowUp":
+      return "↑";
+    case "ArrowDown":
+      return "↓";
+    case "ArrowLeft":
+      return "←";
+    case "ArrowRight":
+      return "→";
+    default:
+      return key.length === 1 ? key.toUpperCase() : key;
+  }
+}
+
+function bindingLabel(value) {
+  const parts = [];
+  if (value.ctrl && value.meta) {
+    parts.push("Ctrl/Cmd");
+  } else {
+    if (value.ctrl) {
+      parts.push("Ctrl");
+    }
+    if (value.meta) {
+      parts.push("⌘");
+    }
+  }
+  if (value.alt) {
+    parts.push("Alt");
+  }
+  if (value.shift) {
+    parts.push("Shift");
+  }
+  parts.push(keyLabel(value.key));
+  return parts.join("+");
+}
+
+function bindingMatches(value, event) {
+  if (event.key.toLowerCase() !== value.key.toLowerCase()) {
+    return false;
+  }
+  if (value.ctrl && value.meta) {
+    if (!event.ctrlKey && !event.metaKey) {
+      return false;
+    }
+  } else if (event.ctrlKey !== value.ctrl || event.metaKey !== value.meta) {
+    return false;
+  }
+  return event.altKey === value.alt && event.shiftKey === value.shift;
+}
+
+function bindingSignature(value) {
+  return [
+    value.key.toLowerCase(),
+    value.ctrl || value.meta,
+    value.alt,
+    value.shift,
+  ].join("|");
+}
+
+function bindingProblem(action, value) {
+  if (value.key === "Escape") {
+    return "Esc is reserved for closing.";
+  }
+  if (value.key === "Tab") {
+    return "Tab is reserved for moving focus.";
+  }
+  if (action !== "place" && value.key === "Enter") {
+    return "Enter places stones.";
+  }
+  if (value.key === "," && (value.ctrl || value.meta)) {
+    return "Ctrl/Cmd+, opens Preferences.";
+  }
+  if (action !== "undo" && (value.ctrl || value.meta || value.alt)) {
+    return "Use a key without Ctrl, Cmd or Alt here.";
+  }
+  const signature = bindingSignature(value);
+  for (const other of KEY_ACTIONS) {
+    if (other !== action &&
+        bindingSignature(bindings[other]) === signature) {
+      return `Already used for ${ACTION_LABELS[other]}.`;
+    }
+  }
+  return "";
+}
+
+const bindingButtons = new Map(
+  KEY_ACTIONS.map((action) => [
+    action,
+    document.getElementById(`binding-${action}`),
+  ]),
+);
+let capturingAction = null;
+
+function renderBindings() {
+  for (const action of KEY_ACTIONS) {
+    const button = bindingButtons.get(action);
+    if (button === null || button === undefined) {
+      continue;
+    }
+    const capturing = capturingAction === action;
+    button.textContent = capturing
+      ? "Press keys…"
+      : bindingLabel(bindings[action]);
+    button.classList.toggle("capturing", capturing);
+    button.setAttribute(
+      "aria-label",
+      capturing
+        ? `Press keys for ${ACTION_LABELS[action]}`
+        : `Change ${ACTION_LABELS[action]} shortcut, currently ` +
+          bindingLabel(bindings[action]),
+    );
+  }
+  canvas.setAttribute(
+    "aria-label",
+    "Dot placement board. Move with " +
+      `${bindingLabel(bindings.up)}, ${bindingLabel(bindings.down)}, ` +
+      `${bindingLabel(bindings.left)} and ${bindingLabel(bindings.right)}. ` +
+      `Place with ${bindingLabel(bindings.place)} or Enter. Pan with ` +
+      `${bindingLabel(bindings["pan-up"])} and the other pan keys. ` +
+      `Undo with ${bindingLabel(bindings.undo)}.`,
+  );
+}
+
+for (const action of KEY_ACTIONS) {
+  const button = bindingButtons.get(action);
+  if (button === null || button === undefined) {
+    continue;
+  }
+  button.addEventListener("click", () => {
+    capturingAction = action;
+    prefsError.textContent = "";
+    renderBindings();
+  });
+}
+
+prefsDialog.addEventListener("keydown", (event) => {
+  if (capturingAction === null) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.key === "Escape") {
+    capturingAction = null;
+    prefsError.textContent = "";
+    renderBindings();
+    return;
+  }
+  if (MODIFIER_KEYS.has(event.key)) {
+    return;
+  }
+  const value = makeBinding(event.key, event.ctrlKey, event.metaKey,
+    event.altKey, event.shiftKey);
+  const problem = bindingProblem(capturingAction, value);
+  if (problem !== "") {
+    prefsError.textContent = problem;
+    return;
+  }
+  bindings[capturingAction] = value;
+  capturingAction = null;
+  prefsError.textContent = "";
+  saveBindings();
+  renderBindings();
+});
+
+prefsDialog.addEventListener("close", () => {
+  capturingAction = null;
+  prefsError.textContent = "";
+  renderBindings();
+});
+
+function openPreferences() {
+  if (typeof prefsDialog.showModal !== "function" || prefsDialog.open) {
+    return;
+  }
+  capturingAction = null;
+  prefsError.textContent = "";
+  syncThemeControls();
+  renderBindings();
+  prefsDialog.showModal();
+}
+
+prefsOpenBtn.addEventListener("click", openPreferences);
+prefsOpenBtn.title = "Preferences (Ctrl/Cmd+,)";
+prefsOpenBtn.setAttribute("aria-keyshortcuts", "Control+Comma Meta+Comma");
+
+prefsResetBtn.addEventListener("click", () => {
+  for (const action of KEY_ACTIONS) {
+    bindings[action] = cloneBinding(DEFAULT_BINDINGS[action]);
+  }
+  capturingAction = null;
+  prefsError.textContent = "";
+  saveBindings();
+  renderBindings();
+});
+
+for (const radio of themeRadios) {
+  radio.addEventListener("change", () => {
+    if (radio.checked) {
+      applyTheme(radio.value);
+    }
+  });
+}
+
+// Safari lacks closedby; keep light dismiss on the backdrop there too.
+if (typeof HTMLDialogElement !== "undefined" &&
+    !("closedBy" in HTMLDialogElement.prototype)) {
+  let pressedOutside = false;
+  const outside = (event) => {
+    const rect = prefsDialog.getBoundingClientRect();
+    return event.clientX < rect.left || event.clientX > rect.right ||
+      event.clientY < rect.top || event.clientY > rect.bottom;
+  };
+  prefsDialog.addEventListener("pointerdown", (event) => {
+    pressedOutside = outside(event);
+  });
+  prefsDialog.addEventListener("pointerup", (event) => {
+    if (pressedOutside && outside(event)) {
+      prefsDialog.close();
+    }
+  });
+}
+
+systemDark?.addEventListener?.("change", syncThemeControls);
+
+window.addEventListener("storage", (event) => {
+  if (event.key === STORAGE_THEME) {
+    theme = normalizeTheme(event.newValue);
+    if (themeMeta !== null) {
+      themeMeta.content = theme === "system" ? "light dark" : theme;
+    }
+    syncThemeControls();
+    return;
+  }
+  if (event.key === STORAGE_BINDINGS) {
+    bindings = loadBindings();
+    renderBindings();
+  }
+});
+
+bindings = loadBindings();
+theme = normalizeTheme(readStored(STORAGE_THEME));
+if (themeMeta !== null) {
+  themeMeta.content = theme === "system" ? "light dark" : theme;
+}
+syncThemeControls();
+renderBindings();
+
+// Pan keys default to Shift+Arrow; they are rebindable in Preferences.
+document.addEventListener("keydown", (event) => {
+  if (prefsDialog.open) {
+    return; // the modal owns its keys, including Esc and capture
+  }
+
+  if (event.key === "," && (event.ctrlKey || event.metaKey)) {
     event.preventDefault();
-    placeAtCursor();
+    openPreferences();
     return;
   }
 
@@ -4811,13 +5349,47 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
-  const editing = event.target instanceof HTMLInputElement ||
+  const onText = event.target instanceof HTMLInputElement ||
     event.target instanceof HTMLTextAreaElement ||
     (event.target instanceof HTMLElement && event.target.isContentEditable);
-  const undoCombo = !editing && !event.shiftKey &&
-    (event.ctrlKey || event.metaKey) &&
-    event.key.toLowerCase() === "z";
-  if (undoCombo) {
+  const onButton = event.target instanceof HTMLButtonElement;
+  if (onText) {
+    return; // fields keep arrows, Space, Enter and native undo
+  }
+  if (onButton && (event.key === " " || event.key === "Enter")) {
+    return; // let the focused button activate
+  }
+
+  for (const action of PAN_ACTIONS) {
+    if (!bindingMatches(bindings[action], event)) {
+      continue;
+    }
+    event.preventDefault();
+    const [dx, dy] = PAN_DELTA[action];
+    panBoard(dx, dy);
+    return;
+  }
+
+  for (const action of MOVE_ACTIONS) {
+    if (!bindingMatches(bindings[action], event)) {
+      continue;
+    }
+    event.preventDefault();
+    const [dx, dy] = MOVE_DELTA[action];
+    moveCursor(dx, dy);
+    return;
+  }
+
+  if (bindingMatches(bindings.place, event) || event.key === "Enter") {
+    if (event.isComposing || event.keyCode === 229) {
+      return; // Enter belongs to an IME candidate list
+    }
+    event.preventDefault();
+    placeAtCursor();
+    return;
+  }
+
+  if (bindingMatches(bindings.undo, event)) {
     event.preventDefault();
     undo();
   }

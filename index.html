@@ -3,6 +3,18 @@
 	<head>
 		<meta charset="utf-8">
 		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<meta name="color-scheme" content="light dark">
+		<script>
+			// Apply the stored theme before the stylesheet paints (FOUC guard).
+			try {
+				const saved = localStorage.getItem("dotdot.theme");
+				if (saved === "light" || saved === "dark") {
+					document.querySelector('meta[name="color-scheme"]').content = saved;
+				}
+			} catch {
+				// Storage blocked: keep the system default.
+			}
+		</script>
 		<title>Dot Dot</title>
 		<link rel="stylesheet" href="style.css">
 	</head>
@@ -126,6 +138,7 @@
 							<div class="actions">
 								<button id="undo" type="button" disabled>Undo</button>
 								<button id="clear" type="button" disabled>Clear</button>
+								<button id="prefs-open" type="button">Preferences…</button>
 							</div>
 						</div>
 					</div>
@@ -151,6 +164,85 @@
 				</div>
 			</div>
 		</main>
+
+		<dialog id="prefs" closedby="any" aria-labelledby="prefs-title">
+			<div class="prefs-head">
+				<h1 id="prefs-title">Preferences</h1>
+				<form method="dialog" class="prefs-close-form">
+					<button
+						id="prefs-close"
+						class="prefs-close"
+						type="submit"
+						value="close"
+						aria-label="Close preferences"
+					>×</button>
+				</form>
+			</div>
+
+			<fieldset class="prefs-group">
+				<legend>Theme</legend>
+				<div class="theme-options">
+					<label>
+						<input
+							id="theme-system"
+							name="theme"
+							type="radio"
+							value="system"
+							autofocus
+						>
+						System
+					</label>
+					<label>
+						<input id="theme-light" name="theme" type="radio" value="light">
+						Light
+					</label>
+					<label>
+						<input id="theme-dark" name="theme" type="radio" value="dark">
+						Dark
+					</label>
+				</div>
+				<p id="theme-system-note" class="theme-note" aria-live="polite"></p>
+			</fieldset>
+
+			<fieldset class="prefs-group">
+				<legend>Keyboard</legend>
+				<div class="prefs-rows">
+					<span>Move up</span>
+					<button id="binding-up" class="binding" type="button"></button>
+					<span>Move down</span>
+					<button id="binding-down" class="binding" type="button"></button>
+					<span>Move left</span>
+					<button id="binding-left" class="binding" type="button"></button>
+					<span>Move right</span>
+					<button id="binding-right" class="binding" type="button"></button>
+					<span>Pan up</span>
+					<button id="binding-pan-up" class="binding" type="button"></button>
+					<span>Pan down</span>
+					<button id="binding-pan-down" class="binding" type="button"></button>
+					<span>Pan left</span>
+					<button id="binding-pan-left" class="binding" type="button"></button>
+					<span>Pan right</span>
+					<button id="binding-pan-right" class="binding" type="button"></button>
+					<span>Place stone</span>
+					<button id="binding-place" class="binding" type="button"></button>
+					<span>Undo</span>
+					<button id="binding-undo" class="binding" type="button"></button>
+				</div>
+				<p class="prefs-hint">
+					Click a key, then press the new shortcut. Esc cancels.
+					Shift+Arrow pans by default; Enter always places.
+				</p>
+				<p id="prefs-error" class="prefs-error" aria-live="polite"></p>
+			</fieldset>
+
+			<div class="prefs-actions">
+				<button id="prefs-reset" type="button">Reset shortcuts</button>
+				<form method="dialog">
+					<button type="submit" value="done">Done</button>
+				</form>
+			</div>
+		</dialog>
+
 		<script src="main.js"></script>
 	</body>
 </html>

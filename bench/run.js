@@ -20,6 +20,22 @@ function loadGame(file = process.env.ENGINE || "main.js") {
       removeStones: typeof removeStones === "function" ? removeStones : null,
       restoreStones:
         typeof restoreStones === "function" ? restoreStones : null,
+      historyMoveIndex:
+        typeof historyMoveIndex === "function" ? historyMoveIndex : null,
+      historyMovePlayer:
+        typeof historyMovePlayer === "function" ? historyMovePlayer : null,
+      historyRemovedStartAt:
+        typeof historyRemovedStartAt === "function"
+          ? historyRemovedStartAt : null,
+      historyRemovedCountAt:
+        typeof historyRemovedCountAt === "function"
+          ? historyRemovedCountAt : null,
+      historyRemovedIndexAt:
+        typeof historyRemovedIndexAt === "function"
+          ? historyRemovedIndexAt : null,
+      historyRemovedPlayerAt:
+        typeof historyRemovedPlayerAt === "function"
+          ? historyRemovedPlayerAt : null,
       rebuildWalls: typeof rebuildWalls === "function" ? rebuildWalls : null,
       sweepWalls: typeof sweepWalls === "function" ? sweepWalls : null,
       compactWalls: typeof compactWalls === "function" ? compactWalls : null,
@@ -202,9 +218,11 @@ function historyLength(game) {
 
 function historyRemovedLength(game, at = historyLength(game) - 1) {
   const state = game.state;
-  return state.historyLength === undefined
-    ? state.history[at].removed.length
-    : state.historyRemovedCount[at];
+  if (state.historyLength === undefined) {
+    return state.history[at].removed.length;
+  }
+  return game.historyRemovedCountAt
+    ? game.historyRemovedCountAt(at) : state.historyRemovedCount[at];
 }
 
 function historyRemoved(game, at = historyLength(game) - 1) {
@@ -212,13 +230,19 @@ function historyRemoved(game, at = historyLength(game) - 1) {
   if (state.historyLength === undefined) {
     return state.history[at].removed;
   }
-  const start = state.historyRemovedStart[at];
-  const count = state.historyRemovedCount[at];
+  const start = game.historyRemovedStartAt
+    ? game.historyRemovedStartAt(at) : state.historyRemovedStart[at];
+  const count = game.historyRemovedCountAt
+    ? game.historyRemovedCountAt(at) : state.historyRemovedCount[at];
   const removed = new Array(count);
   for (let i = 0; i < count; i += 1) {
     removed[i] = {
-      index: state.historyRemovedIndex[start + i],
-      player: state.historyRemovedPlayer[start + i],
+      index: game.historyRemovedIndexAt
+        ? game.historyRemovedIndexAt(start + i)
+        : state.historyRemovedIndex[start + i],
+      player: game.historyRemovedPlayerAt
+        ? game.historyRemovedPlayerAt(start + i)
+        : state.historyRemovedPlayer[start + i],
     };
   }
   return removed;
